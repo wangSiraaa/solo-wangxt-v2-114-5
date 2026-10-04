@@ -159,3 +159,61 @@ DROP TRIGGER IF EXISTS inventory_equation_freeze_trg
 CREATE TRIGGER inventory_equation_freeze_trg
 BEFORE UPDATE ON inventory_allometricequation
 FOR EACH ROW EXECUTE FUNCTION inventory_equation_freeze();
+
+-- ---- equation adoption review: append-only audit + terminal states -------
+-- Review events and locked comparisons are an audit trail: never rewritten
+-- or deleted, even by direct SQL.
+CREATE OR REPLACE FUNCTION inventory_review_append_only()
+RETURNS trigger AS $$
+BEGIN
+  RAISE EXCEPTION
+    'equation-review audit rows (%) are append-only and immutable',
+    TG_TABLE_NAME;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS inventory_review_event_freeze_trg
+  ON inventory_reviewevent;
+CREATE TRIGGER inventory_review_event_freeze_trg
+BEFORE UPDATE OR DELETE ON inventory_reviewevent
+FOR EACH ROW EXECUTE FUNCTION inventory_review_append_only();
+
+DROP TRIGGER IF EXISTS inventory_review_comparison_freeze_trg
+  ON inventory_reviewcomparison;
+CREATE TRIGGER inventory_review_comparison_freeze_trg
+BEFORE UPDATE OR DELETE ON inventory_reviewcomparison
+FOR EACH ROW EXECUTE FUNCTION inventory_review_append_only();
+
+-- A review is immutable once approved/withdrawn, and a validated candidate
+-- spec can never be silently rewritten (withdraw + open a new review).
+CREATE OR REPLACE FUNCTION inventory_review_state_freeze()
+RETURNS trigger AS $$
+BEGIN
+  IF OLD.status IN ('approved', 'withdrawn')
+     AND (NEW.status IS DISTINCT FROM OLD.status
+          OR NEW.candidate_spec IS DISTINCT FROM OLD.candidate_spec) THEN
+    RAISE EXCEPTION
+      'Equation adoption review % is % (terminal); it cannot be changed.',
+      OLD.id, OLD.status;
+  END IF;
+  IF OLD.status = 'validated'
+     AND NEW.candidate_spec IS DISTINCT FROM OLD.candidate_spec THEN
+    RAISE EXCEPTION
+      'Candidate spec of review % is frozen after validation; withdraw '
+      'and open a new review instead.', OLD.id;
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS inventory_review_state_freeze_trg
+  ON inventory_equationadoptionreview;
+CREATE TRIGGER inventory_review_state_freeze_trg
+BEFORE UPDATE ON inventory_equationadoptionreview
+FOR EACH ROW EXECUTE FUNCTION inventory_review_state_freeze();
+
+-- One review can generate at most one estimate version (concurrent
+-- double-approval invariant; the ORM creates this unique constraint too).
+CREATE UNIQUE INDEX IF NOT EXISTS inventory_estimate_review_unique
+  ON inventory_estimateversion (generated_by_review_id)
+  WHERE generated_by_review_id IS NOT NULL;

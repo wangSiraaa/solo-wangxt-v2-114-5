@@ -21,8 +21,10 @@ from inventory.models import (
     AllometricEquation,
     Campaign,
     CONFLICT_OPEN,
+    EquationAdoptionReview,
     EstimateVersion,
     Plot,
+    ReviewComparison,
     Species,
     Stratum,
     Tree,
@@ -305,3 +307,358 @@ class EstimatorAcceptanceTests(TestCase):
         self.assertIn("estimator", res["design"])
         self.assertTrue(res["uncertainty_assumptions"])
         self.assertIn("OAK", res["equations_used"])
+
+
+# ===========================================================================
+# Equation adoption review (candidate -> validated -> approved/withdrawn)
+# ===========================================================================
+from inventory.services.ingest import import_campaign_rows as _import  # noqa
+
+
+class EquationReviewTests(TestCase):
+    def setUp(self):
+        self.sA = Stratum.objects.create(code="A", name="A", area_ha=100.0)
+        self.oak = Species.objects.create(code="OAK", name="Oak")
+        self.pine = Species.objects.create(code="PIN", name="Pine")
+        self.eq_oak = AllometricEquation.objects.create(
+            code="OAK-AGB", version="1.0", status="confirmed",
+            a=0.1, b=2.0, c=0.5, dbh_min_cm=5.0, dbh_max_cm=100.0,
+            residual_sigma=0.1, citation="oak baseline")
+        self.eq_oak.species.add(self.oak)
+        self.eq_pin = AllometricEquation.objects.create(
+            code="PIN-AGB", version="1.0", status="confirmed",
+            a=0.1, b=2.0, c=0.5, dbh_min_cm=5.0, dbh_max_cm=100.0,
+            residual_sigma=0.1, citation="pine baseline")
+        self.eq_pin.species.add(self.pine)
+        self.t1 = Campaign.objects.create(code="t1", measured_on="2019-01-01")
+        self.t2 = Campaign.objects.create(code="t2", measured_on="2024-01-01")
+        self.p1 = Plot.objects.create(
+            code="P1", stratum=self.sA, x_m=0, y_m=0,
+            declared_area_ha=0.10, boundary=rect(0, 0, 50, 20),
+            area_polygon_ha=0.10)
+        # one oak survivor with real growth
+        _import(self.t1, [
+            dict(plot="P1", field_number="1", species="OAK", x_m=5, y_m=5,
+                 status=AM, dbh_raw=20.0, dbh_unit="cm",
+                 height_raw=15.0, height_unit="m"),
+            dict(plot="P1", field_number="2", species="PIN", x_m=8, y_m=8,
+                 status=AM, dbh_raw=24.0, dbh_unit="cm",
+                 height_raw=17.0, height_unit="m"),
+        ], 0.01)
+        _import(self.t2, [
+            dict(plot="P1", field_number="1", species="OAK", x_m=5, y_m=5,
+                 status=AM, dbh_raw=21.0, dbh_unit="cm",
+                 height_raw=15.3, height_unit="m"),
+            dict(plot="P1", field_number="2", species="PIN", x_m=8, y_m=8,
+                 status=AM, dbh_raw=25.0, dbh_unit="cm",
+                 height_raw=17.4, height_unit="m"),
+        ], 0.01)
+        self.client = APIClient()
+        r = self.client.post("/api/estimates/", dict(
+            label="baseline v1", t1_campaign="t1", t2_campaign="t2",
+            equation_ids=[self.eq_oak.id, self.eq_pin.id], fpc=False),
+            format="json")
+        self.assertEqual(r.status_code, 201, r.content)
+        self.baseline_id = r.json()["id"]
+        self.baseline_growth = r.json()["result_payload"]["components"][
+            "survivor_growth"]["total_kg"]
+        rc = self.client.post(f"/api/estimates/{self.baseline_id}/confirm/")
+        self.assertEqual(rc.status_code, 200, rc.content)
+
+    def _candidate(self, species_overrides=None, code="OAK-AGB",
+                   version="2.0", dbh_max=100.0, a=0.12, label="candidate",
+                   include_pine=True):
+        spec = {"OAK": dict(code=code, version=version, a=a, b=2.0, c=0.5,
+                            dbh_min_cm=5.0, dbh_max_cm=dbh_max,
+                            height_required=True, residual_sigma=0.1,
+                            citation="oak revised")}
+        if include_pine:
+            spec["PIN"] = dict(code="PIN-AGB", version="2.0", a=0.1,
+                               b=2.0, c=0.5, dbh_min_cm=5.0,
+                               dbh_max_cm=100.0, height_required=True,
+                               residual_sigma=0.1, citation="pine revised")
+        if species_overrides:
+            spec.update(species_overrides)
+        r = self.client.post("/api/equation-reviews/",
+                             dict(label=label, candidate_spec=spec),
+                             format="json")
+        self.assertEqual(r.status_code, 201, r.content)
+        rid = r.json()["id"]
+        self.assertEqual(r.json()["status"], "candidate")
+        return rid
+
+    def _validate(self, rid):
+        r = self.client.post(f"/api/equation-reviews/{rid}/validate/", {},
+                             format="json")
+        return r
+
+    def _compare(self, rid):
+        return self.client.post(
+            f"/api/equation-reviews/{rid}/compare/",
+            dict(baseline_version=self.baseline_id), format="json")
+
+    # ---------- 1. complete coverage -> independent new version ---------------
+    def test_full_coverage_generates_new_version_and_keeps_baseline(self):
+        rid = self._candidate(a=0.12)
+        vr = self._validate(rid)
+        self.assertEqual(vr.status_code, 200, vr.content)
+        self.assertEqual(vr.json()["status"], "validated")
+
+        cr = self._compare(rid)
+        self.assertEqual(cr.status_code, 201, cr.content)
+        c = cr.json()
+        self.assertEqual(c["status"], "complete")
+        self.assertTrue(c["baseline_reproduced"])
+        # coverage matrix: both species rows
+        rows = {r["species"]: r for r in c["coverage_matrix"]["rows"]}
+        self.assertIn("OAK", rows)
+        self.assertTrue(rows["OAK"]["covered"])
+        self.assertTrue(rows["OAK"]["dbh_classes"])
+        # tree and plot and population level diffs all present
+        self.assertTrue(c["difference_payload"]["trees"])
+        self.assertTrue(c["difference_payload"]["plots"])
+        self.assertIn("survivor_growth",
+                      c["difference_payload"]["population"]["components"])
+        tree1 = next(t for t in c["difference_payload"]["trees"]
+                     if t["tree"] == "P1/1")
+        self.assertIsNotNone(tree1["delta_agb_kg"])
+
+        ar = self.client.post(f"/api/equation-reviews/{rid}/approve/", {},
+                              format="json")
+        self.assertEqual(ar.status_code, 201, ar.content)
+        new_id = ar.json()["new_estimate_version_id"]
+        self.assertNotEqual(new_id, self.baseline_id)
+
+        # old version byte-stable and still confirmed
+        old = self.client.get(f"/api/estimates/{self.baseline_id}/").json()
+        self.assertEqual(old["status"], "confirmed")
+        self.assertEqual(old["result_payload"]["components"][
+            "survivor_growth"]["total_kg"], self.baseline_growth)
+        # new version is independently confirmed and numerically different
+        new = self.client.get(f"/api/estimates/{new_id}/").json()
+        self.assertEqual(new["status"], "confirmed")
+        self.assertNotEqual(
+            new["result_payload"]["components"]["survivor_growth"]["total_kg"],
+            self.baseline_growth)
+        # review exposes the generated version id
+        review = self.client.get(f"/api/equation-reviews/{rid}/").json()
+        self.assertEqual(review["status"], "approved")
+        self.assertEqual(review["approved_version_id"], new_id)
+        # baseline equation untouched; new equation row exists as v2.0
+        self.eq_oak.refresh_from_db()
+        self.assertEqual(self.eq_oak.a, 0.1)
+        new_eq = AllometricEquation.objects.get(code="OAK-AGB", version="2.0")
+        self.assertEqual(new_eq.a, 0.12)
+        self.assertEqual(new_eq.status, "confirmed")
+
+    # ---------- 2. missing species / out-of-range -> incomplete, no approve --
+    def test_missing_species_marks_incomplete_and_forbids_approval(self):
+        rid = self._candidate(a=0.12, include_pine=False)
+        self.assertEqual(self._validate(rid).status_code, 200)
+        cr = self._compare(rid)
+        self.assertEqual(cr.status_code, 202, cr.content)
+        c = cr.json()
+        self.assertEqual(c["status"], "incomplete")
+        self.assertIn("PIN", c["coverage_matrix"]["missing_species"])
+        kinds = {r["kind"] for r in c["incomplete_reasons"]}
+        self.assertIn("missing_species", kinds)
+
+        ar = self.client.post(f"/api/equation-reviews/{rid}/approve/", {},
+                              format="json")
+        self.assertEqual(ar.status_code, 409)
+        # no new version, baseline still sole confirmed output
+        self.assertFalse(
+            EstimateVersion.objects.exclude(pk=self.baseline_id).exists())
+
+    def test_out_of_dbh_range_marks_incomplete_and_forbids_approval(self):
+        rid = self._candidate(a=0.12, dbh_max=20.5)  # 21 cm oak t2 exceeds it
+        self.assertEqual(self._validate(rid).status_code, 200)
+        cr = self._compare(rid)
+        c = cr.json()
+        self.assertEqual(c["status"], "incomplete")
+        self.assertTrue(c["coverage_matrix"]["out_of_range_trees"])
+        self.assertTrue(any(r["kind"] == "out_of_dbh_range"
+                            for r in c["incomplete_reasons"]))
+        ar = self.client.post(f"/api/equation-reviews/{rid}/approve/", {},
+                              format="json")
+        self.assertEqual(ar.status_code, 409)
+
+    # ---------- 3. withdrawn: comparisons retained, cannot confirm ----------
+    def test_withdrawn_keeps_comparison_audit_but_blocks_approval(self):
+        rid = self._candidate(a=0.12)
+        self.assertEqual(self._validate(rid).status_code, 200)
+        cr = self._compare(rid)
+        self.assertEqual(cr.status_code, 201)
+        comparison_id = cr.json()["id"]
+
+        wr = self.client.post(f"/api/equation-reviews/{rid}/withdraw/", {},
+                              format="json")
+        self.assertEqual(wr.status_code, 200)
+        self.assertEqual(wr.json()["status"], "withdrawn")
+
+        # comparison record survives
+        got = self.client.get(
+            f"/api/equation-reviews/{rid}/comparisons/").json()
+        self.assertEqual([c["id"] for c in got], [comparison_id])
+        # approval impossible
+        ar = self.client.post(f"/api/equation-reviews/{rid}/approve/", {},
+                              format="json")
+        self.assertEqual(ar.status_code, 409)
+        events = [e["event"] for e in
+                  self.client.get(f"/api/equation-reviews/{rid}/").json()[
+                      "events"]]
+        self.assertEqual(events[-1], "withdrawn")
+
+    # ---------- 4. drift: comparison refused when data changed ---------------
+    def test_comparison_refused_when_locked_inputs_drifted(self):
+        rid = self._candidate(a=0.12)
+        self.assertEqual(self._validate(rid).status_code, 200)
+        # tamper with a measurement AFTER baseline confirmation (simulates a
+        # data correction): baseline can no longer reproduce -> refuse
+        m = TreeMeasurement.objects.get(campaign=self.t2,
+                                        field_number_seen="1")
+        m.dbh_cm = 21.6
+        # bypass any app checks: direct update changes canonical value
+        TreeMeasurement.objects.filter(pk=m.pk).update(dbh_cm=21.6)
+        cr = self._compare(rid)
+        self.assertEqual(cr.status_code, 409)
+        self.assertFalse(cr.json()["lock"]["baseline_reproduced"])
+        self.assertIsNone(
+            ReviewComparison.objects.filter(review=rid).first())
+
+    # ---------- 5. ordinary flow ignores candidates entirely ----------------
+    def test_normal_two_occasion_flow_ignores_candidates(self):
+        # candidate exists but is never selected by the normal estimator
+        rid = self._candidate(a=0.5, code="OAK-FANCY", version="9.9")
+        self.assertEqual(self._validate(rid).status_code, 200)
+        r = self.client.post("/api/estimates/", dict(
+            label="ordinary draft", t1_campaign="t1", t2_campaign="t2",
+            equation_ids=[self.eq_oak.id, self.eq_pin.id], fpc=False),
+            format="json")
+        self.assertEqual(r.status_code, 201)
+        payload = r.json()["result_payload"]
+        self.assertEqual(
+            payload["components"]["survivor_growth"]["total_kg"],
+            self.baseline_growth)
+        self.assertNotIn("OAK-FANCY", payload["equations_used"])
+
+
+# ---------- concurrency: only one new version on double approval ------------
+from django.db import IntegrityError, transaction as _tx  # noqa: E402
+from django.test import TransactionTestCase  # noqa: E402
+
+
+class ConcurrentApprovalTests(TransactionTestCase):
+    reset_sequences = True
+
+    def setUp(self):
+        self.sA = Stratum.objects.create(code="A", name="A", area_ha=100.0)
+        self.oak = Species.objects.create(code="OAK", name="Oak")
+        self.eq = AllometricEquation.objects.create(
+            code="OAK-AGB", version="1.0", status="confirmed",
+            a=0.1, b=2.0, c=0.5, dbh_min_cm=5.0, dbh_max_cm=100.0,
+            residual_sigma=0.1, citation="oak baseline")
+        self.eq.species.add(self.oak)
+        self.t1 = Campaign.objects.create(code="t1", measured_on="2019-01-01")
+        self.t2 = Campaign.objects.create(code="t2", measured_on="2024-01-01")
+        Plot.objects.create(
+            code="P1", stratum=self.sA, x_m=0, y_m=0,
+            declared_area_ha=0.10, boundary=rect(0, 0, 50, 20),
+            area_polygon_ha=0.10)
+        _import(self.t1, [dict(plot="P1", field_number="1", species="OAK",
+                               x_m=5, y_m=5, status=AM, dbh_raw=20.0,
+                               dbh_unit="cm", height_raw=15.0,
+                               height_unit="m")], 0.01)
+        _import(self.t2, [dict(plot="P1", field_number="1", species="OAK",
+                               x_m=5, y_m=5, status=AM, dbh_raw=21.0,
+                               dbh_unit="cm", height_raw=15.3,
+                               height_unit="m")], 0.01)
+
+    def _ready_review(self, client, a=0.12):
+        r = client.post("/api/estimates/", dict(
+            label="base", t1_campaign="t1", t2_campaign="t2",
+            equation_ids=[self.eq.id], fpc=False), format="json")
+        base_id = r.json()["id"]
+        self.assertEqual(
+            client.post(f"/api/estimates/{base_id}/confirm/").status_code, 200)
+        rr = client.post("/api/equation-reviews/", dict(
+            label="cand", candidate_spec={"OAK": dict(
+                code="OAK-AGB", version="2.0", a=a, b=2.0, c=0.5,
+                dbh_min_cm=5.0, dbh_max_cm=100.0, height_required=True,
+                residual_sigma=0.1, citation="rev")}), format="json")
+        rid = rr.json()["id"]
+        self.assertEqual(client.post(
+            f"/api/equation-reviews/{rid}/validate/", {},
+            format="json").status_code, 200)
+        self.assertEqual(client.post(
+            f"/api/equation-reviews/{rid}/compare/",
+            dict(baseline_version=base_id), format="json").status_code, 201)
+        return rid, base_id
+
+    def test_second_approval_after_race_creates_no_extra_version(self):
+        """The loser of a concurrent approval gets 409; still one version."""
+        c = APIClient()
+        rid, _ = self._ready_review(c)
+
+        first = c.post(f"/api/equation-reviews/{rid}/approve/", {},
+                       format="json")
+        self.assertEqual(first.status_code, 201, first.content)
+        winner_id = first.json()["new_estimate_version_id"]
+
+        # Simulated losing concurrent request: review now terminal.
+        second = c.post(f"/api/equation-reviews/{rid}/approve/", {},
+                        format="json")
+        self.assertEqual(second.status_code, 409)
+        versions = EstimateVersion.objects.filter(generated_by_review_id=rid)
+        self.assertEqual(list(versions.values_list("id", flat=True)),
+                         [winner_id])
+
+    def test_unique_constraint_blocks_a_second_generated_version(self):
+        """DB-level guarantee behind the API: one review -> one edition."""
+        c = APIClient()
+        rid, _ = self._ready_review(c)
+        first = c.post(f"/api/equation-reviews/{rid}/approve/", {},
+                       format="json")
+        self.assertEqual(first.status_code, 201)
+
+        review = EquationAdoptionReview.objects.get(pk=rid)
+        with self.assertRaises(IntegrityError):
+            with _tx.atomic():
+                EstimateVersion.objects.create(
+                    label="duplicate attempt", t1_campaign=self.t1,
+                    t2_campaign=self.t2, status="confirmed",
+                    design_snapshot={}, result_payload={},
+                    equation_checksum="x", generated_by_review=review)
+        self.assertEqual(
+            EstimateVersion.objects.filter(generated_by_review_id=rid)
+            .count(), 1)
+
+    def test_approve_review_loses_race_after_lock(self):
+        """
+        Simulate the exact interleaving on PostgreSQL: both approvals pass the
+        cheap pre-checks and enter the atomic block; one commits first, the
+        second's locked-row status recheck (or the OneToOne constraint)
+        rejects it. The loser reports the single surviving version.
+        """
+        from inventory.services import review as review_service
+        c = APIClient()
+        rid, _ = self._ready_review(c, a=0.13)
+        review = EquationAdoptionReview.objects.get(pk=rid)
+        comparison = review.comparisons.first()
+
+        # Winner commits normally.
+        _r, winner = review_service.approve_review(
+            EquationAdoptionReview.objects.get(pk=rid),
+            comparison=comparison)
+        self.assertEqual(winner.generated_by_review_id, rid)
+
+        # A stale in-memory approver that raced past the initial status check:
+        # force it into the locked block, where the recheck must reject it.
+        stale = EquationAdoptionReview.objects.get(pk=rid)
+        self.assertEqual(stale.status, "approved")
+        with self.assertRaises(review_service.ReviewStateError):
+            review_service.approve_review(stale, comparison=comparison)
+        self.assertEqual(
+            EstimateVersion.objects.filter(generated_by_review_id=rid)
+            .count(), 1)
+

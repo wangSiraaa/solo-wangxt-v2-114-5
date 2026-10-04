@@ -304,4 +304,57 @@ class Command(BaseCommand):
                 f"{f.get('t2_field_number')} d={f['distance_m']}m "
                 f"[{f['hint']}]")
 
+        self._seed_review_candidate(oak_eq, pin_eq, bir_eq)
+
         self.stdout.write(self.style.SUCCESS("seed complete"))
+
+    def _seed_review_candidate(self, oak_eq, pin_eq, bir_eq):
+        """
+        Seed a NEW (unvalidated) candidate equation set for the adoption
+        review scenario. It is deliberately just a candidate (JSON spec),
+        never an AllometricEquation row: the ordinary estimate flow cannot
+        pick it up. A second, deliberately narrow candidate is added so the
+        UI can demonstrate an incomplete (out-of-dbh-range) comparison once
+        a baseline edition has been confirmed.
+        """
+        from inventory.models import EquationAdoptionReview, ReviewEvent
+
+        def spec_from(eq, **over):
+            d = dict(code=eq.code, version="2026-review",
+                     a=float(eq.a), b=float(eq.b), c=float(eq.c),
+                     dbh_min_cm=float(eq.dbh_min_cm),
+                     dbh_max_cm=float(eq.dbh_max_cm),
+                     height_required=eq.height_required,
+                     residual_sigma=float(eq.residual_sigma),
+                     citation=eq.citation + " — 2026 re-fit (fictional)")
+            d.update(over)
+            return d
+
+        full = {
+            "OAK": spec_from(oak_eq, a=0.1280, b=2.3950, c=0.6020,
+                             dbh_max_cm=120.0),
+            "PIN": spec_from(pin_eq, a=0.0970, b=2.4480, dbh_max_cm=110.0),
+            "BIR": spec_from(bir_eq, a=0.1120, b=2.3470, dbh_max_cm=80.0),
+        }
+        review = EquationAdoptionReview.objects.create(
+            label="2026 station-wide re-fit (candidate)",
+            candidate_spec=full, species_scope=sorted(full))
+        ReviewEvent.objects.create(
+            review=review, event=ReviewEvent.EVENT_CREATED, actor="biomass-lab",
+            note="2026 remeasurement re-fit; full species coverage",
+            payload={"species_scope": sorted(full)})
+
+        # narrow oak candidate: max dbh 90 cm, while P04/002 is ~102-103.5 cm
+        narrow = {"OAK": spec_from(oak_eq, version="2026-oak90",
+                                   dbh_max_cm=90.0)}
+        narrow_review = EquationAdoptionReview.objects.create(
+            label="2026 oak-only re-fit capped at 90 cm (candidate)",
+            candidate_spec=narrow, species_scope=sorted(narrow))
+        ReviewEvent.objects.create(
+            review=narrow_review, event=ReviewEvent.EVENT_CREATED,
+            actor="biomass-lab",
+            note="oak-only; expect incomplete coverage (P04/002 > 90 cm)",
+            payload={"species_scope": sorted(narrow)})
+        self.stdout.write(
+            "seeded 2 equation-adoption candidates (validate/compare/approve "
+            "via the Equation reviews tab)")

@@ -226,6 +226,11 @@ def compute_plot_components(plot_code, plot_info, pairing, equations,
 
         if r2["status"] == STATUS_DEAD:
             # mortality observed at the t2 remeasurement at the same spot
+            if eq is None:
+                pc.equation_missing_input_ids.append(
+                    {"tree": tag,
+                     "reason": f"no equation for species {r1['species']}"})
+                continue
             if r1["status"] != STATUS_ALIVE_MEASURED or not _has_eq_inputs(r1, eq):
                 pc.equation_missing_input_ids.append(
                     {"tree": tag, "reason": "dead but t1 dbh/height missing"})
@@ -249,7 +254,8 @@ def compute_plot_components(plot_code, plot_info, pairing, equations,
 
         if r2["status"] == STATUS_ALIVE_NOT_MEASURED:
             # alive, confirmed present, but dbh missing — NOT zero growth
-            if r1["status"] == STATUS_ALIVE_MEASURED and _has_eq_inputs(r1, eq):
+            if (eq is not None and r1["status"] == STATUS_ALIVE_MEASURED
+                    and _has_eq_inputs(r1, eq)):
                 b1, _ = agb(r1)
                 pc.survivor_missing.append(
                     {"tree": tag, "reason": "alive t2, dbh not measured",
@@ -266,6 +272,11 @@ def compute_plot_components(plot_code, plot_info, pairing, equations,
             if r1["status"] != STATUS_ALIVE_MEASURED:
                 pc.survivor_missing.append(
                     {"tree": tag, "reason": f"t1 status {r1['status']}"})
+                continue
+            if eq is None:
+                pc.equation_missing_input_ids.append(
+                    {"tree": tag,
+                     "reason": f"no equation for species {r1['species']}"})
                 continue
             if not (_has_eq_inputs(r1, eq) and _has_eq_inputs(r2, eq)):
                 pc.equation_missing_input_ids.append(

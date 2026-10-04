@@ -103,3 +103,61 @@ footer { margin-top: 26px; color: var(--muted); font-size: 12px; }
 @media (max-width: 900px) {
   .detail-grid, .two-col { grid-template-columns: 1fr; }
 }
+
+/* ------------------------------------------------ equation adoption review */
+.review-toolbar { margin: 10px 0; }
+.review-table tr { cursor: pointer; }
+.review-table tr.approved { background: #f3faf4; }
+.review-table tr.withdrawn { color: var(--muted); background: #f6f7f6; }
+.badge.review-status-candidate { background: #eef2f7; color: #33485f; }
+.badge.review-status-validated { background: #fdf3dd; color: #9a6b00; }
+.badge.review-status-approved { background: #e7f6e9; color: var(--green); }
+.badge.review-status-withdrawn { background: #eceff1; color: #607d8b; }
+.badge.review-status-incomplete { background: #fdecec; color: var(--red); }
+
+.composer, .review-detail { background: #fff; border: 1px solid var(--line);
+  border-radius: 10px; padding: 12px 16px; margin-top: 14px; }
+.review-detail.approved { border-color: var(--green); }
+.review-detail.withdrawn { opacity: 0.92; }
+.review-controls { display: flex; gap: 12px; align-items: center;
+  flex-wrap: wrap; margin: 10px 0; }
+.compare-bar { display: inline-flex; gap: 8px; align-items: center;
+  font-size: 13px; }
+.actions { display: flex; gap: 8px; margin-top: 10px; }
+button.primary { background: var(--green); color: #fff; border-color: var(--green); }
+
+.candidate-table input { width: 100%; padding: 3px 5px; font-size: 12px; }
+.candidate-table td, .candidate-table th { font-size: 12px; padding: 3px 5px; }
+
+.check-list { list-style: none; padding-left: 4px; font-size: 13px; }
+.check-list .pass { color: var(--green); }
+.check-list .fail { color: var(--red); }
+.check-list small { color: var(--muted); }
+
+.comparison { border: 1px solid var(--line); border-radius: 8px;
+  margin: 10px 0; background: #fcfdfc; }
+.comparison.incomplete { border-color: #e4b3b3; }
+.comparison.complete { border-color: #b7dabd; }
+.comparison > header { display: flex; gap: 10px; align-items: center;
+  padding: 8px 12px; cursor: pointer; font-size: 13px; flex-wrap: wrap; }
+.comparison .toggle { margin-left: auto; color: var(--muted); }
+.comparison h5 { margin: 12px 0 4px; }
+.comparison table, .review-detail table { margin: 4px 0 10px; }
+.ok-chip { background: #e7f6e9; color: var(--green); border-radius: 10px;
+  padding: 1px 9px; font-size: 11px; white-space: nowrap; }
+.err-chip { background: #fdecec; color: var(--red); border-radius: 10px;
+  padding: 1px 9px; font-size: 11px; white-space: nowrap; }
+.class-chip { display: inline-block; border-radius: 8px; padding: 1px 7px;
+  font-size: 11px; margin: 1px 3px 1px 0; }
+.class-chip.covered { background: #e7f6e9; color: var(--green); }
+.class-chip.uncovered { background: #fdecec; color: var(--red); }
+.matrix-table tr.covered td { background: #f7fcf8; }
+.matrix-table tr.uncovered td { background: #fef6f6; }
+.tree-diff tr.oor td { background: #fff8ec; }
+.tree-diff tr.uncovered td { background: #fef6f6; }
+.event-list { font-size: 12.5px; }
+.event-list li { margin: 3px 0; }
+.event-list code { color: var(--muted); }
+.fingerprints { max-height: 260px; overflow: auto; }
+.diff-table td, .diff-table th, .matrix-table td, .matrix-table th {
+  font-size: 12px; padding: 3px 7px; }

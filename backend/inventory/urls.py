@@ -2,12 +2,15 @@ from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
 from inventory import views
+from inventory.review_views import EquationReviewViewSet
 
 router = DefaultRouter()
 router.register("strata", views.StratumViewSet)
 router.register("species", views.SpeciesViewSet)
 router.register("campaigns", views.CampaignViewSet)
 router.register("equations", views.EquationViewSet)
+router.register("equation-reviews", EquationReviewViewSet,
+                basename="equation-review")
 router.register("plots", views.PlotViewSet)
 router.register("trees", views.TreeViewSet, basename="tree")
 router.register("measurements", views.MeasurementViewSet,

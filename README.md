@@ -71,6 +71,30 @@ Y = Σ_h Y_h，SE 跨层合成（Welch–Satterthwaite 自由度，t 分布 95% 
 * 确认时同时**锁定所用方程**（系数不可改）；新系数必须以**新方程 code/version** 录入，
   并产生**新版本估计**，旧版本数字永不改变。
 
+### 1.7 新版异速生长方程采用评审（差异只能来自方程本身）
+研究团队采用新版方程前，必须先证明与既有已确认估计的差异**不**来自数据、身份判断或
+抽样框漂移。主场景“方程采用评审”：
+
+* 候选按 **candidate → validated → approved / withdrawn** 流转；候选以**不可变 JSON
+  规格**保存适用树种、径阶（dbh 范围）、系数 a/b/c、残差 σ、文献、方程形式与校验结果。
+  候选**不是** `AllometricEquation` 行，因此普通两期估计流程永远选不到它；已锁定方程
+  也绝不被改动。
+* **影响比较必须锁定一个既有 confirmed `EstimateVersion`**：重新读取该版的调查数据、
+  人工身份决定（冲突核实/改号）与抽样设计快照，对测量、身份、样地/层/面积分别取 SHA-256
+  指纹，并用**基准方程重算**——只有与已确认结果载荷逐字节一致（无数据/身份/框漂移）才
+  接受比较；否则比较被拒绝（HTTP 409，记录审计事件）。
+* 锁通过后，候选在**完全相同**的锁定输入上重算，输出：
+  * **覆盖矩阵**（树种 × 径阶：覆盖/缺树种/超径阶计数与树号、外推清单、缺失覆盖）；
+  * **逐树、逐样地、总体**三层基准版 vs 新版差异（生物量 kg/Mg、Δ、Δ%、SE）与外推。
+* 比较状态 `complete` / `incomplete`：**缺少树种或超出候选径阶即 incomplete，禁止批准**。
+* 批准时再次校验全部指纹与结果哈希未变，随后创建**全新的方程 code/version 行**与一个
+  **独立的新 confirmed `EstimateVersion`**；基准版、基准方程、基准结果均不被修改。
+  `EstimateVersion.generated_by_review` 为一对一关系——**同一评审并发批准只产生一个新版本**
+  （行锁 + 唯一约束，数据库层保证；败者返回 409 与已生成版本号）。
+* **候选被撤回（withdrawn）后，既有比较与全部事件作为审计保留，但不能再批准/确认。**
+* 普通两期估计流程在不选择候选时行为完全不变（候选根本不出现在方程列表中）。
+
+
 ---
 
 ## 2. 不确定性假设（结果中完整输出）
@@ -113,11 +137,14 @@ npm install
 npm run dev          # http://localhost:5173, /api 代理到 8123
 ```
 
-界面三页：
+界面四页：
 1. **Plots & individuals**：SVG 地图显示全部样地边界与 t2 个体状态；点入样地看 t1→t2 复测、
    改号、零生长/缺测/死亡着色；
 2. **Identity conflicts**：编号矛盾核实工作台（renumber / distinct）；
-3. **Estimates**：选择方程→跑 draft→查看分量、来源、不确定性→确认冻结。
+3. **Estimates**：选择方程→跑 draft→查看分量、来源、不确定性→确认冻结；
+4. **Equation reviews**：候选创建（系数/径阶/文献表）→校验→锁定 confirmed 基准做影响比较，
+   查看**覆盖矩阵、差异来源（逐树/逐样地/总体）、外推与缺失覆盖**，完整方可批准生成独立新版本，
+   或撤回；含历史评审与审批事件时间线。
 
 ---
 
@@ -133,6 +160,31 @@ npm run dev          # http://localhost:5173, /api 代理到 8123
 | POST | `/api/estimates/` | 运行 draft 估计 |
 | POST | `/api/estimates/{id}/confirm/` | 冻结版本并锁定方程 |
 | GET | `/api/estimates/{id}/` | 完整结果：分量 + 来源 + 不确定性 |
+| POST | `/api/equation-reviews/` | 创建候选（candidate_spec：树种→系数/径阶/文献） |
+| POST | `/api/equation-reviews/{id}/validate/` | 结构/域校验 → validated |
+| POST | `/api/equation-reviews/{id}/compare/` | 锁定 confirmed 基准版并做影响比较/覆盖矩阵 |
+| POST | `/api/equation-reviews/{id}/approve/` | 仅 complete 可比：生成新方程行 + 新 confirmed 版本 |
+| POST | `/api/equation-reviews/{id}/withdraw/` | 撤回（比较保留审计，禁止批准） |
+| GET | `/api/equation-reviews/` / `{id}/` | 评审列表/详情（内嵌审批与事件历史） |
+| GET | `/api/equation-reviews/{id}/comparisons/` | 覆盖矩阵、逐树/逐样地/总体差异、锁定指纹 |
+
+### 候选规格示例
+```json
+{
+  "label": "2026 station re-fit",
+  "candidate_spec": {
+    "OAK": {"code": "OAK-AGB", "version": "2026-review",
+            "a": 0.128, "b": 2.395, "c": 0.602,
+            "dbh_min_cm": 5.0, "dbh_max_cm": 120.0,
+            "height_required": true, "residual_sigma": 0.18,
+            "citation": "fictional oak 2026 refit"}
+  }
+}
+```
+比较请求：`POST /api/equation-reviews/{id}/compare/`，body `{"baseline_version": 7}`。
+完整覆盖返回 201（`status: complete`）；缺树种/超径阶返回 202（`status: incomplete`）；
+基准不可复现（漂移）返回 409。
+
 
 ### 入库行示例
 ```json
@@ -154,8 +206,16 @@ npm run dev          # http://localhost:5173, /api 代理到 8123
 ```bash
 cd backend && python3 manage.py test inventory
 ```
-12 个测试覆盖：改号、同号位置矛盾（剔除→核实 distinct 后才入死亡/进界）、
-不等面积按样地扩展、单位错误拒收、零生长/缺测/死亡区分、已确认版本对新方程与直接篡改免疫。
+21 个测试覆盖：改号、同号位置矛盾（剔除→核实 distinct 后才入死亡/进界）、
+不等面积按样地扩展、单位错误拒收、零生长/缺测/死亡区分、已确认版本对新方程与直接篡改免疫，
+以及**方程采用评审**：
+
+* 完整覆盖的新方程批准后生成**独立新版本**、旧版本数字与基准方程不变；
+* **缺少树种**或**超出径阶**时比较标记 `incomplete` 且批准被禁止（409）；
+* 基准版因测量/身份/框变更而**不可复现**时比较被拒绝（409），不留伪比较；
+* 候选**撤回**后比较与事件审计保留，但不能再批准；
+* **同一评审并发/重复批准只产生一个新版本**（唯一约束 + 行锁；重复批准 409）；
+* 普通两期估计流程不选择候选时行为完全不变（候选不进入方程列表）。
 
 ## 6. 虚构演示数据场景索引
 * `P01/004` 两次胸径相同 → **真实零生长**；
@@ -166,4 +226,8 @@ cd backend && python3 manage.py test inventory
 * `201` 系列（dbh 4.2–6.4）→ 进界阈值边界，<5 cm 排除；
 * `P04/002` dbh 102 cm → **超出方程径阶范围**标记；
 * 4 条坏行（mm 当 cm、树高 cm 当 m、缺单位、坐标越界）→ **入库拒收**；
-* 样地面积 0.20 / 0.50 / 1.00 ha 不等。
+* 样地面积 0.20 / 0.50 / 1.00 ha 不等；
+* 两个**方程采用评审候选**：`2026 station-wide re-fit`（三树种全覆盖、径阶放宽到可覆盖
+  P04/002 的 102 cm，可批准）与 `2026 oak-only … capped at 90 cm`（仅 OAK 且 90 cm 上限，
+  比较必为 **incomplete**：P04/002 超径阶）。先在 Estimates 页确认一版基准，再到
+  Equation reviews 页 validate → compare → approve/withdraw。

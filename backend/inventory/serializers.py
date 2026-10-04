@@ -3,9 +3,12 @@ from rest_framework import serializers
 from inventory.models import (
     AllometricEquation,
     Campaign,
+    EquationAdoptionReview,
     EstimateVersion,
     IdentityConflict,
     Plot,
+    ReviewComparison,
+    ReviewEvent,
     Species,
     Stratum,
     Tree,
@@ -149,3 +152,81 @@ class MeasurementImportRowSerializer(serializers.Serializer):
 class MeasurementImportSerializer(serializers.Serializer):
     campaign = serializers.CharField()
     rows = MeasurementImportRowSerializer(many=True)
+
+
+# ------------------------------------------------- equation adoption review
+class CandidateEquationInputSerializer(serializers.Serializer):
+    """One candidate equation inside a review spec."""
+
+    code = serializers.CharField(max_length=32)
+    version = serializers.CharField(max_length=16)
+    a = serializers.FloatField()
+    b = serializers.FloatField()
+    c = serializers.FloatField()
+    dbh_min_cm = serializers.FloatField()
+    dbh_max_cm = serializers.FloatField()
+    height_required = serializers.BooleanField(required=False, default=True)
+    residual_sigma = serializers.FloatField()
+    citation = serializers.CharField(max_length=240)
+    form = serializers.CharField(
+        max_length=64, required=False,
+        default="agb = a * dbh_cm^b * height_m^c")
+
+
+class ReviewCreateSerializer(serializers.Serializer):
+    label = serializers.CharField(max_length=120)
+    # {species_code: candidate equation fields}
+    candidate_spec = serializers.DictField(
+        child=CandidateEquationInputSerializer())
+    actor = serializers.CharField(max_length=80, required=False,
+                                  allow_blank=True, default="")
+    note = serializers.CharField(max_length=400, required=False,
+                                 allow_blank=True, default="")
+
+
+class ReviewActionSerializer(serializers.Serializer):
+    actor = serializers.CharField(max_length=80, required=False,
+                                  allow_blank=True, default="")
+    note = serializers.CharField(max_length=400, required=False,
+                                 allow_blank=True, default="")
+
+
+class ReviewCompareSerializer(ReviewActionSerializer):
+    baseline_version = serializers.IntegerField()
+
+
+class ReviewApproveSerializer(ReviewActionSerializer):
+    comparison_id = serializers.IntegerField(required=False, allow_null=True)
+
+
+class ReviewEventSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ReviewEvent
+        fields = ["id", "event", "actor", "note", "payload", "created_at"]
+
+
+class ReviewComparisonSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ReviewComparison
+        fields = [
+            "id", "review", "baseline_version", "status",
+            "lock_fingerprints", "coverage_matrix", "difference_payload",
+            "incomplete_reasons", "baseline_reproduced", "created_at",
+        ]
+
+
+class ReviewSerializer(serializers.ModelSerializer):
+    events = ReviewEventSerializer(many=True, read_only=True)
+    approved_version_id = serializers.SerializerMethodField()
+
+    class Meta:
+        model = EquationAdoptionReview
+        fields = [
+            "id", "label", "status", "candidate_spec", "species_scope",
+            "validation_payload", "validated_at", "approved_at",
+            "withdrawn_at", "created_at", "events", "approved_version_id",
+        ]
+
+    def get_approved_version_id(self, obj):
+        v = getattr(obj, "generated_version", None)
+        return v.id if v else None
