@@ -61,8 +61,8 @@ def biomass_measurement_variance(agb, dbh_cm, height_m, eq,
 
 
 # --------------------------------------------------------------- table build
-def build_measurement_table(t1_campaign, t2_campaign, equations_qs):
-    """Returns (table_rows, equations_by_species, plots, strata)."""
+def equations_mapping_from_qs(equations_qs):
+    """Species-code -> equation parameter dict for a queryset of equations."""
     equations = {}
     for e in equations_qs:
         for sp in e.species.all():
@@ -76,10 +76,14 @@ def build_measurement_table(t1_campaign, t2_campaign, equations_qs):
                 "residual_sigma": e.residual_sigma,
                 "citation": e.citation,
             }
+    return equations
 
+
+def build_plots_strata():
+    """Current sampling frame: plots and strata lookup dicts."""
+    from inventory.models import Plot, Stratum
     plots = {}
     strata = {}
-    from inventory.models import Plot, Stratum
     for s in Stratum.objects.all():
         strata[s.code] = {"code": s.code, "name": s.name,
                           "area_ha": s.area_ha, "plot_codes": []}
@@ -91,35 +95,48 @@ def build_measurement_table(t1_campaign, t2_campaign, equations_qs):
             "x_m": p.x_m, "y_m": p.y_m,
         }
         strata[p.stratum.code]["plot_codes"].append(p.code)
+    return plots, strata
 
-    def rows_for(campaign):
-        out = []
-        from inventory.models import TreeMeasurement
-        qs = (
-            TreeMeasurement.objects
-            .filter(campaign=campaign)
-            .select_related("tree", "tree__plot", "tree__species",
-                            "tree__superseded_tree")
-        )
-        for m in qs:
-            out.append({
-                "tree_id": m.tree_id,
-                "plot": m.tree.plot.code,
-                "species": m.tree.species.code,
-                "field_number": m.field_number_seen,
-                "x_m": m.x_m, "y_m": m.y_m,
-                "status": m.status,
-                "dbh_cm": m.dbh_cm,
-                "height_m": m.height_m,
-                "verified_renumber_of": (
-                    m.tree.superseded_tree_id
-                    if campaign == t2_campaign
-                    else None
-                ),
-            })
-        return out
 
-    return rows_for(t1_campaign), rows_for(t2_campaign), equations, plots, strata
+def measurement_rows_for_campaign(campaign, t2_campaign=None):
+    """
+    One estimator-table row per TreeMeasurement of a campaign.
+
+    ``t2_campaign`` marks the remeasurement occasion on which a tree's
+    superseded-tree link denotes a field-book verified renumber (mirrors
+    build_measurement_table's historic behaviour).
+    """
+    from inventory.models import TreeMeasurement
+    out = []
+    qs = TreeMeasurement.objects.filter(campaign=campaign).select_related(
+        "tree", "tree__plot", "tree__species", "tree__superseded_tree")
+    for m in qs:
+        out.append({
+            "tree_id": m.tree_id,
+            "plot": m.tree.plot.code,
+            "species": m.tree.species.code,
+            "field_number": m.field_number_seen,
+            "x_m": m.x_m, "y_m": m.y_m,
+            "status": m.status,
+            "dbh_cm": m.dbh_cm,
+            "height_m": m.height_m,
+            "verified_renumber_of": (
+                m.tree.superseded_tree_id
+                if t2_campaign is not None and campaign == t2_campaign
+                else None
+            ),
+        })
+    return out
+
+
+def build_measurement_table(t1_campaign, t2_campaign, equations_qs):
+    """Returns (table_rows, equations_by_species, plots, strata)."""
+    equations = equations_mapping_from_qs(equations_qs)
+    plots, strata = build_plots_strata()
+
+    return (measurement_rows_for_campaign(t1_campaign, t2_campaign),
+            measurement_rows_for_campaign(t2_campaign, t2_campaign),
+            equations, plots, strata)
 
 
 def resolved_identity_pairs(t1_campaign, t2_campaign):

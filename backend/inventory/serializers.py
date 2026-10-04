@@ -3,9 +3,13 @@ from rest_framework import serializers
 from inventory.models import (
     AllometricEquation,
     Campaign,
+    CandidateEvent,
+    EquationCandidate,
+    EquationReview,
     EstimateVersion,
     IdentityConflict,
     Plot,
+    ReviewEvent,
     Species,
     Stratum,
     Tree,
@@ -114,11 +118,11 @@ class EstimateVersionSerializer(serializers.ModelSerializer):
         fields = [
             "id", "label", "t1_campaign", "t2_campaign", "status",
             "design_snapshot", "result_payload", "equation_checksum",
-            "created_at", "confirmed_at",
+            "generated_by_review", "created_at", "confirmed_at",
         ]
         read_only_fields = [
             "status", "design_snapshot", "result_payload",
-            "equation_checksum", "confirmed_at",
+            "equation_checksum", "generated_by_review", "confirmed_at",
         ]
 
 
@@ -149,3 +153,120 @@ class MeasurementImportRowSerializer(serializers.Serializer):
 class MeasurementImportSerializer(serializers.Serializer):
     campaign = serializers.CharField()
     rows = MeasurementImportRowSerializer(many=True)
+
+
+# ------------------------------------------------- equation adoption review
+class CandidateEventSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CandidateEvent
+        fields = ["id", "event", "actor", "note", "payload", "created_at"]
+
+
+class ReviewEventSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ReviewEvent
+        fields = ["id", "event", "actor", "note", "payload", "created_at"]
+
+
+class EquationCandidateSerializer(serializers.ModelSerializer):
+    species_codes = serializers.SlugRelatedField(
+        many=True, read_only=True, slug_field="code", source="species"
+    )
+    n_open_reviews = serializers.SerializerMethodField()
+    n_reviews = serializers.SerializerMethodField()
+
+    class Meta:
+        model = EquationCandidate
+        fields = [
+            "id", "code", "version", "species_codes", "status", "form",
+            "a", "b", "c", "dbh_min_cm", "dbh_max_cm",
+            "height_required", "residual_sigma", "citation",
+            "validation_result", "validated_at", "withdrawn_at",
+            "created_at", "n_open_reviews", "n_reviews",
+        ]
+        read_only_fields = ["status", "validation_result", "validated_at",
+                            "withdrawn_at", "created_at"]
+
+    def get_n_open_reviews(self, obj):
+        return obj.reviews.filter(status="open").count()
+
+    def get_n_reviews(self, obj):
+        return obj.reviews.count()
+
+
+class EquationCandidateCreateSerializer(serializers.Serializer):
+    code = serializers.CharField(max_length=32)
+    version = serializers.CharField(max_length=16)
+    species_codes = serializers.ListField(
+        child=serializers.CharField(), allow_empty=False)
+    form = serializers.CharField(
+        max_length=64, required=False,
+        default="agb = a * dbh_cm^b * height_m^c")
+    a = serializers.FloatField()
+    b = serializers.FloatField()
+    c = serializers.FloatField()
+    dbh_min_cm = serializers.FloatField()
+    dbh_max_cm = serializers.FloatField()
+    height_required = serializers.BooleanField(required=False, default=True)
+    residual_sigma = serializers.FloatField()
+    citation = serializers.CharField(max_length=240, required=False,
+                                     allow_blank=True)
+
+
+class ReviewSummarySerializer(serializers.ModelSerializer):
+    candidate_label = serializers.SerializerMethodField()
+    baseline_label = serializers.SerializerMethodField()
+    new_version_id = serializers.SerializerMethodField()
+    net_delta_mg = serializers.SerializerMethodField()
+
+    class Meta:
+        model = EquationReview
+        fields = [
+            "id", "label", "candidate", "baseline_version", "status",
+            "coverage_status", "candidate_label", "baseline_label",
+            "net_delta_mg", "new_version_id",
+            "compared_at", "approved_at", "withdrawn_at", "created_at",
+        ]
+
+    def get_candidate_label(self, obj):
+        c = obj.candidate
+        return f"{c.code}@{c.version}"
+
+    def get_baseline_label(self, obj):
+        b = obj.baseline_version
+        return f"#{b.id} {b.label} [{b.status}]"
+
+    def get_new_version_id(self, obj):
+        v = obj.generated_versions.order_by("id").first()
+        return v.id if v else None
+
+    def get_net_delta_mg(self, obj):
+        if obj.comparison:
+            return obj.comparison["population"]["net_change"]["delta_mg"]
+        return None
+
+
+class ReviewDetailSerializer(ReviewSummarySerializer):
+    class Meta(ReviewSummarySerializer.Meta):
+        fields = ReviewSummarySerializer.Meta.fields + [
+            "lock_snapshot", "lock_checksum", "comparison",
+            "candidate_checksum_at_comparison",
+        ]
+
+
+class ReviewCreateSerializer(serializers.Serializer):
+    candidate_id = serializers.IntegerField()
+    baseline_version_id = serializers.IntegerField()
+    label = serializers.CharField(max_length=160, required=False,
+                                  allow_blank=True)
+
+
+class ReviewApproveSerializer(serializers.Serializer):
+    label = serializers.CharField(max_length=160, required=False,
+                                  allow_blank=True)
+    actor = serializers.CharField(max_length=80, required=False)
+
+
+class CandidateActionSerializer(serializers.Serializer):
+    note = serializers.CharField(required=False, allow_blank=True)
+    actor = serializers.CharField(max_length=80, required=False)

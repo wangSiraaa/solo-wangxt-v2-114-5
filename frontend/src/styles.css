@@ -103,3 +103,46 @@ footer { margin-top: 26px; color: var(--muted); font-size: 12px; }
 @media (max-width: 900px) {
   .detail-grid, .two-col { grid-template-columns: 1fr; }
 }
+
+/* ---- equation adoption review ---- */
+.section-head { display: flex; justify-content: space-between; align-items: center; }
+.sub-card { background: #fbfdfb; border: 1px solid var(--line); border-radius: 10px;
+  padding: 10px 14px; margin: 10px 0; }
+.sub-card h4, .sub-card h5 { margin: 8px 0; }
+.cand-candidate { color: #9a6b00; font-weight: 600; }
+.cand-validated { color: #1565c0; font-weight: 600; }
+.cand-approved { color: var(--green); font-weight: 600; }
+.cand-withdrawn { color: var(--muted); font-weight: 600; }
+.badge.cand-candidate { background: #fdf3dd; color: #9a6b00; }
+.badge.cand-validated { background: #e3eefc; color: #1565c0; }
+.badge.cand-approved { background: #e7f6e9; color: var(--green); }
+.badge.cand-withdrawn { background: #eceff1; color: var(--muted); }
+.cover-complete { color: var(--green); font-weight: 700; }
+.cover-incomplete { color: var(--red); font-weight: 700; }
+.cover-pending { color: var(--muted); }
+.badge.cover-complete { background: #e7f6e9; color: var(--green); }
+.badge.cover-incomplete { background: #fdecec; color: var(--red); }
+.badge.cover-pending { background: #eceff1; color: var(--muted); }
+.status-withdrawn { color: var(--muted); font-weight: 600; }
+.badge.status-withdrawn { background: #eceff1; color: var(--muted); }
+.pos { color: var(--green); }
+.neg { color: var(--red); }
+.ok-line { color: var(--green); }
+.bad-line { color: var(--red); }
+.diff-sources { font-size: 12.5px; background: #f4f8f4; border-radius: 8px;
+  padding: 8px 14px; margin: 8px 0; }
+.diff-sources ul { margin: 4px 0; padding-left: 18px; }
+.mini-tabs { display: flex; gap: 4px; margin: 10px 0 6px; flex-wrap: wrap; }
+.mini-tabs .tab { padding: 4px 10px; font-size: 12px; }
+.create-form { background: #fbfdfb; border: 1px dashed var(--line);
+  border-radius: 10px; padding: 10px 14px; margin: 8px 0; }
+.form-row { display: flex; gap: 14px; flex-wrap: wrap; align-items: center;
+  margin: 6px 0; }
+.form-row label { font-size: 13px; display: flex; gap: 6px; align-items: center; }
+.form-row input { padding: 4px 6px; border: 1px solid var(--line);
+  border-radius: 5px; width: 90px; }
+.form-row input.wide { width: 260px; }
+.inline-chk { margin-right: 10px; white-space: nowrap; }
+.matrix-species { margin: 8px 0; }
+tr.approved { background: #f4faf5; }
+tr.withdrawn { color: var(--muted); }

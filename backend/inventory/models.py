@@ -69,6 +69,39 @@ VERSION_STATUS_CHOICES = [
     (VERSION_SUPERSEDED, "Superseded by a newer confirmed version"),
 ]
 
+# Equation-adoption review workflow. A candidate equation is a PROPOSED new
+# coefficient set under review; it is not usable by the ordinary two-occasion
+# estimate flow until it is approved, at which point a normal locked
+# AllometricEquation row and a NEW confirmed EstimateVersion are produced.
+CANDIDATE_PROPOSED = "candidate"
+CANDIDATE_VALIDATED = "validated"
+CANDIDATE_APPROVED = "approved"
+CANDIDATE_WITHDRAWN = "withdrawn"
+CANDIDATE_STATUS_CHOICES = [
+    (CANDIDATE_PROPOSED, "Candidate — proposed, awaiting validation"),
+    (CANDIDATE_VALIDATED, "Validated — passed checks, reviewable"),
+    (CANDIDATE_APPROVED, "Approved — adopted as a new equation/version"),
+    (CANDIDATE_WITHDRAWN, "Withdrawn — retained for audit only"),
+]
+
+REVIEW_OPEN = "open"
+REVIEW_APPROVED = "approved"
+REVIEW_WITHDRAWN = "withdrawn"
+REVIEW_STATUS_CHOICES = [
+    (REVIEW_OPEN, "Open — comparison available/awaiting decision"),
+    (REVIEW_APPROVED, "Approved — new EstimateVersion generated"),
+    (REVIEW_WITHDRAWN, "Withdrawn with the candidate — audit retained"),
+]
+
+COVERAGE_PENDING = "pending"
+COVERAGE_COMPLETE = "complete"
+COVERAGE_INCOMPLETE = "incomplete"
+REVIEW_COVERAGE_CHOICES = [
+    (COVERAGE_PENDING, "No comparison run yet"),
+    (COVERAGE_COMPLETE, "Complete coverage — approval permitted"),
+    (COVERAGE_INCOMPLETE, "Incomplete — approval blocked"),
+]
+
 
 class Stratum(models.Model):
     """Sampling stratum with known land area (the sampling frame)."""
@@ -374,6 +407,14 @@ class EstimateVersion(models.Model):
         help_text="Full component breakdown + provenance + uncertainty."
     )
     equation_checksum = models.CharField(max_length=64, blank=True)
+    # Provenance of editions produced through the equation-adoption workflow.
+    # Ordinary draft/confirm runs leave these null (their behaviour is
+    # unchanged); adoption-produced editions point back to the review so the
+    # chain "candidate -> review -> new confirmed version" is auditable.
+    generated_by_review = models.ForeignKey(
+        "EquationReview", on_delete=models.PROTECT,
+        null=True, blank=True, related_name="generated_versions",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     confirmed_at = models.DateTimeField(null=True, blank=True)
 
@@ -392,3 +433,205 @@ class EstimateVersion(models.Model):
 
     def __str__(self):
         return f"{self.label} [{self.status}]"
+
+
+class EquationCandidate(models.Model):
+    """
+    A PROPOSED allometric equation under adoption review.
+
+    lifecycle: candidate -> validated -> approved | withdrawn
+
+    The candidate carries the same applicability metadata as a confirmed
+    equation (species, dbh range, coefficients, citation). While under
+    review it is frozen after validation (coefficients cannot silently
+    drift under an existing comparison) but it NEVER participates in the
+    ordinary /api/estimates/ flow and it never mutates a locked equation.
+    On approval a brand-new AllometricEquation (new code/version) is
+    created from the candidate; the candidate itself stays as audit.
+    """
+
+    code = models.CharField(max_length=32)
+    version = models.CharField(max_length=16)
+    species = models.ManyToManyField(Species, related_name="candidate_equations")
+    status = models.CharField(
+        max_length=12, choices=CANDIDATE_STATUS_CHOICES,
+        default=CANDIDATE_PROPOSED,
+    )
+    form = models.CharField(max_length=64,
+                            default="agb = a * dbh_cm^b * height_m^c")
+    a = models.FloatField()
+    b = models.FloatField()
+    c = models.FloatField()
+    dbh_min_cm = models.FloatField()
+    dbh_max_cm = models.FloatField()
+    height_required = models.BooleanField(default=True)
+    residual_sigma = models.FloatField(
+        help_text="Multiplicative residual SD of ln(agb) [dimensionless]."
+    )
+    citation = models.CharField(max_length=240)
+    validation_result = models.JSONField(
+        null=True, blank=True,
+        help_text="Structural/empirical check output of the validate action.",
+    )
+    validated_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    withdrawn_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["code", "version"]
+        unique_together = [("code", "version")]
+
+    _FROZEN_FIELDS = ("code", "version", "a", "b", "c", "dbh_min_cm",
+                      "dbh_max_cm", "residual_sigma", "form",
+                      "height_required")
+
+    def save(self, *args, **kwargs):
+        if self.pk:
+            original = type(self).objects.get(pk=self.pk)
+            if original.status in (CANDIDATE_VALIDATED, CANDIDATE_APPROVED):
+                changed = [
+                    f for f in self._FROZEN_FIELDS
+                    if getattr(original, f) != getattr(self, f)
+                ]
+                if changed:
+                    raise PermissionError(
+                        f"Candidate {self.code} v{self.version} is "
+                        f"{original.status}; its coefficients are frozen so "
+                        f"existing comparisons stay reproducible. Withdraw "
+                        f"and open a new candidate instead (changed {changed})."
+                    )
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"candidate {self.code} v{self.version} [{self.status}]"
+
+
+class EquationReview(models.Model):
+    """
+    One adoption review: a validated candidate assessed against one LOCKED
+    confirmed EstimateVersion (the baseline).
+
+    At creation the baseline's survey data (one row per tree-occasion),
+    human identity decisions and design snapshot are copied into
+    ``lock_snapshot`` and checksummed. Every comparison therefore runs on
+    the exact frame the baseline used: observed differences can only come
+    from the equation, never from data edits, identity re-decisions or
+    sampling-frame drift.
+
+    status: open -> approved | withdrawn
+    coverage: pending -> complete | incomplete (set by the comparison run;
+              incomplete blocks approval).
+    """
+
+    label = models.CharField(max_length=160)
+    candidate = models.ForeignKey(
+        EquationCandidate, on_delete=models.PROTECT,
+        related_name="reviews",
+    )
+    baseline_version = models.ForeignKey(
+        EstimateVersion, on_delete=models.PROTECT,
+        related_name="adoption_reviews",
+    )
+    status = models.CharField(
+        max_length=12, choices=REVIEW_STATUS_CHOICES, default=REVIEW_OPEN
+    )
+    coverage_status = models.CharField(
+        max_length=10, choices=REVIEW_COVERAGE_CHOICES, default=COVERAGE_PENDING
+    )
+    # Locked frame: data rows + identity decisions + design/frame snapshot.
+    lock_snapshot = models.JSONField(
+        help_text="Frozen copy of the baseline frame: measurement rows, "
+                  "identity decisions, design snapshot and locked equations."
+    )
+    lock_checksum = models.CharField(max_length=64, blank=True)
+    # Frozen comparison output (per-tree / per-plot / population).
+    comparison = models.JSONField(null=True, blank=True)
+    compared_at = models.DateTimeField(null=True, blank=True)
+    candidate_checksum_at_comparison = models.CharField(max_length=64, blank=True)
+    approved_at = models.DateTimeField(null=True, blank=True)
+    withdrawn_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["status"]),
+            models.Index(fields=["candidate", "baseline_version"]),
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.pk:
+            original = type(self).objects.get(pk=self.pk)
+            if original.status == REVIEW_APPROVED:
+                raise PermissionError(
+                    f"EquationReview {self.pk} is approved and immutable; "
+                    "its comparison and generated version cannot change."
+                )
+            if original.status == REVIEW_WITHDRAWN:
+                raise PermissionError(
+                    f"EquationReview {self.pk} was withdrawn; the record is "
+                    "retained for audit but cannot be confirmed or modified."
+                )
+            # Once set, the lock and comparison are themselves immutable.
+            if original.lock_snapshot and (
+                    self.lock_snapshot != original.lock_snapshot
+                    or self.lock_checksum != original.lock_checksum):
+                raise PermissionError(
+                    "the locked frame of a review cannot be modified.")
+            if original.comparison and self.comparison != original.comparison:
+                raise PermissionError(
+                    "a completed comparison is an audit record and cannot "
+                    "be overwritten.")
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"review {self.label} [{self.status}/{self.coverage_status}]"
+
+
+class ReviewApprovalSlot(models.Model):
+    """
+    Database-level mutex that makes "concurrent approve of one review
+    produces exactly one new EstimateVersion" true on every backend
+    (sqlite included). Creating two rows for the same review violates the
+    unique constraint; the losing transaction rolls back completely.
+    """
+
+    review = models.OneToOneField(
+        EquationReview, on_delete=models.PROTECT,
+        related_name="approval_slot",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
+class ReviewEvent(models.Model):
+    """Append-only audit trail of a review's lifecycle."""
+
+    review = models.ForeignKey(
+        EquationReview, on_delete=models.PROTECT, related_name="events"
+    )
+    event = models.CharField(max_length=24)
+    actor = models.CharField(max_length=80, blank=True,
+                             default="station-console")
+    note = models.CharField(max_length=400, blank=True)
+    payload = models.JSONField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at", "id"]
+
+
+class CandidateEvent(models.Model):
+    """Append-only audit trail of a candidate equation's lifecycle."""
+
+    candidate = models.ForeignKey(
+        EquationCandidate, on_delete=models.PROTECT, related_name="events"
+    )
+    event = models.CharField(max_length=24)
+    actor = models.CharField(max_length=80, blank=True,
+                             default="station-console")
+    note = models.CharField(max_length=400, blank=True)
+    payload = models.JSONField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at", "id"]

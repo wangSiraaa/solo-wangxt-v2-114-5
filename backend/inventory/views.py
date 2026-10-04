@@ -13,7 +13,7 @@ GET  /estimates/{id}/               frozen result with provenance
 import hashlib
 
 from django.conf import settings
-from django.db import transaction
+from django.db import OperationalError, transaction
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
@@ -25,6 +25,8 @@ from inventory.models import (
     CONFLICT_DISTINCT,
     CONFLICT_OPEN,
     CONFLICT_RENUMBER,
+    EquationCandidate,
+    EquationReview,
     EstimateVersion,
     IdentityConflict,
     Plot,
@@ -36,17 +38,28 @@ from inventory.models import (
 )
 from inventory.serializers import (
     CampaignSerializer,
+    CandidateActionSerializer,
+    CandidateEventSerializer,
     ConflictResolveSerializer,
     ConflictSerializer,
+    EquationCandidateCreateSerializer,
+    EquationCandidateSerializer,
     EquationSerializer,
     EstimateVersionSerializer,
     MeasurementImportSerializer,
     MeasurementSerializer,
     PlotSerializer,
+    ReviewApproveSerializer,
+    ReviewCreateSerializer,
+    ReviewDetailSerializer,
+    ReviewEventSerializer,
+    ReviewSummarySerializer,
     SpeciesSerializer,
     StratumSerializer,
     TreeSerializer,
 )
+from inventory.services import adoption
+from inventory.services.adoption import AdoptionError
 from inventory.services.conflicts import scan_conflicts
 from inventory.services.estimator import (
     build_measurement_table,
@@ -55,6 +68,13 @@ from inventory.services.estimator import (
     resolved_identity_pairs,
 )
 from inventory.services.ingest import import_campaign_rows
+
+
+def _adoption_response(exc):
+    return Response(
+        exc.detail if isinstance(exc.detail, dict) else {"detail": exc.detail},
+        status=exc.http_status,
+    )
 
 
 class StratumViewSet(viewsets.ReadOnlyModelViewSet):
@@ -301,3 +321,174 @@ def _get_version(pk):
     from django.shortcuts import get_object_or_404
     return get_object_or_404(
         EstimateVersion.objects.prefetch_related("equations"), pk=pk)
+
+
+# ------------------------------------------- equation adoption review scenario
+class EquationCandidateViewSet(viewsets.ViewSet):
+    """
+    Candidate allometric equations under adoption review.
+
+    POST   /candidate-equations/            create candidate
+    GET    /candidate-equations/             list (+ ?status=)
+    GET    /candidate-equations/{id}/         detail incl. validation result
+    POST   /candidate-equations/{id}/validate/
+    POST   /candidate-equations/{id}/withdraw/
+    GET    /candidate-equations/{id}/events/  audit trail
+    """
+
+    def list(self, request):
+        qs = EquationCandidate.objects.prefetch_related("species").all()
+        state = request.query_params.get("status")
+        if state:
+            qs = qs.filter(status=state)
+        return Response(EquationCandidateSerializer(qs, many=True).data)
+
+    def retrieve(self, request, pk=None):
+        from django.shortcuts import get_object_or_404
+        obj = get_object_or_404(
+            EquationCandidate.objects.prefetch_related("species"), pk=pk)
+        return Response(EquationCandidateSerializer(obj).data)
+
+    def create(self, request):
+        ser = EquationCandidateCreateSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        try:
+            candidate = adoption.create_candidate(
+                ser.validated_data,
+                actor=request.data.get("actor", "station-console"))
+        except AdoptionError as exc:
+            return _adoption_response(exc)
+        return Response(
+            EquationCandidateSerializer(candidate).data,
+            status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["post"])
+    def validate(self, request, pk=None):
+        from django.shortcuts import get_object_or_404
+        candidate = get_object_or_404(EquationCandidate, pk=pk)
+        try:
+            candidate = adoption.validate_candidate(
+                candidate, actor=request.data.get("actor", "station-console"))
+        except AdoptionError as exc:
+            return _adoption_response(exc)
+        return Response(EquationCandidateSerializer(candidate).data)
+
+    @action(detail=True, methods=["post"])
+    def withdraw(self, request, pk=None):
+        from django.shortcuts import get_object_or_404
+        candidate = get_object_or_404(EquationCandidate, pk=pk)
+        ser = CandidateActionSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        try:
+            candidate, _reviews = adoption.withdraw_candidate(
+                candidate, note=ser.validated_data.get("note", ""),
+                actor=ser.validated_data.get("actor", "station-console"))
+        except AdoptionError as exc:
+            return _adoption_response(exc)
+        return Response(EquationCandidateSerializer(candidate).data)
+
+    @action(detail=True, methods=["get"], url_path="events")
+    def events(self, request, pk=None):
+        from django.shortcuts import get_object_or_404
+        candidate = get_object_or_404(EquationCandidate, pk=pk)
+        return Response(CandidateEventSerializer(
+            candidate.events.all(), many=True).data)
+
+
+class EquationReviewViewSet(viewsets.ViewSet):
+    """
+    Adoption reviews: compare a validated candidate against a LOCKED
+    confirmed EstimateVersion, then (only if coverage is complete) approve
+    to generate an independent NEW confirmed EstimateVersion.
+
+    POST /equation-reviews/                      lock baseline + create review
+    GET  /equation-reviews/                      list (history)
+    GET  /equation-reviews/{id}/                 full comparison payload
+    POST /equation-reviews/{id}/compare/         run (write-once) comparison
+    POST /equation-reviews/{id}/approve/         complete -> new version
+    GET  /equation-reviews/{id}/events/          approval/audit history
+    """
+
+    def list(self, request):
+        qs = EquationReview.objects.select_related(
+            "candidate", "baseline_version").all()
+        state = request.query_params.get("status")
+        if state:
+            qs = qs.filter(status=state)
+        coverage = request.query_params.get("coverage")
+        if coverage:
+            qs = qs.filter(coverage_status=coverage)
+        return Response(ReviewSummarySerializer(qs, many=True).data)
+
+    def retrieve(self, request, pk=None):
+        review = _get_review(pk)
+        return Response(ReviewDetailSerializer(review).data)
+
+    def create(self, request):
+        ser = ReviewCreateSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        from django.shortcuts import get_object_or_404
+        candidate = get_object_or_404(
+            EquationCandidate, pk=ser.validated_data["candidate_id"])
+        baseline = get_object_or_404(
+            EstimateVersion, pk=ser.validated_data["baseline_version_id"])
+        try:
+            review = adoption.create_review(
+                candidate, baseline,
+                label=ser.validated_data.get("label", ""),
+                actor=request.data.get("actor", "station-console"))
+        except AdoptionError as exc:
+            return _adoption_response(exc)
+        return Response(ReviewDetailSerializer(review).data,
+                        status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["post"])
+    def compare(self, request, pk=None):
+        review = _get_review(pk)
+        try:
+            review = adoption.run_comparison(
+                review, actor=request.data.get("actor", "station-console"))
+        except AdoptionError as exc:
+            return _adoption_response(exc)
+        return Response(ReviewDetailSerializer(review).data)
+
+    @action(detail=True, methods=["post"])
+    def approve(self, request, pk=None):
+        review = _get_review(pk)
+        ser = ReviewApproveSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        try:
+            review, version, equation = adoption.approve_review(
+                review, label=ser.validated_data.get("label") or None,
+                actor=ser.validated_data.get("actor", "station-console"))
+        except AdoptionError as exc:
+            return _adoption_response(exc)
+        except OperationalError as exc:
+            # Two concurrent approvals raced on the review's approval slot.
+            # On PostgreSQL the loser waits and fails the unique slot
+            # constraint (mapped above); sqlite surfaces an immediate lock
+            # conflict. Either way: one version, and this request loses.
+            return Response(
+                {"detail": "a concurrent approval is in progress for this "
+                           "review; only one new EstimateVersion is generated. "
+                           f"({exc})"},
+                status=status.HTTP_409_CONFLICT)
+        return Response({
+            "review": ReviewDetailSerializer(review).data,
+            "new_version": EstimateVersionSerializer(version).data,
+            "new_equation_id": equation.id,
+            "baseline_version_id": review.baseline_version_id,
+        }, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["get"], url_path="events")
+    def events(self, request, pk=None):
+        review = _get_review(pk)
+        return Response(ReviewEventSerializer(
+            review.events.all(), many=True).data)
+
+
+def _get_review(pk):
+    from django.shortcuts import get_object_or_404
+    return get_object_or_404(
+        EquationReview.objects.select_related(
+            "candidate", "baseline_version"), pk=pk)

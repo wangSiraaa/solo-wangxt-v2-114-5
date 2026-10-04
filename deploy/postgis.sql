@@ -159,3 +159,90 @@ DROP TRIGGER IF EXISTS inventory_equation_freeze_trg
 CREATE TRIGGER inventory_equation_freeze_trg
 BEFORE UPDATE ON inventory_allometricequation
 FOR EACH ROW EXECUTE FUNCTION inventory_equation_freeze();
+
+-- ---- equation adoption: candidate coefficients freeze after validation --
+CREATE OR REPLACE FUNCTION inventory_candidate_freeze()
+RETURNS trigger AS $$
+BEGIN
+  IF OLD.status IN ('validated', 'approved')
+     AND (NEW.a IS DISTINCT FROM OLD.a OR NEW.b IS DISTINCT FROM OLD.b
+          OR NEW.c IS DISTINCT FROM OLD.c
+          OR NEW.residual_sigma IS DISTINCT FROM OLD.residual_sigma
+          OR NEW.dbh_min_cm IS DISTINCT FROM OLD.dbh_min_cm
+          OR NEW.dbh_max_cm IS DISTINCT FROM OLD.dbh_max_cm
+          OR NEW.code IS DISTINCT FROM OLD.code
+          OR NEW.version IS DISTINCT FROM OLD.version) THEN
+    RAISE EXCEPTION
+      'Candidate % v% is %; coefficients are frozen. Withdraw and open a new candidate.',
+      OLD.code, OLD.version, OLD.status;
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS inventory_candidate_freeze_trg
+  ON inventory_equationcandidate;
+CREATE TRIGGER inventory_candidate_freeze_trg
+BEFORE UPDATE ON inventory_equationcandidate
+FOR EACH ROW EXECUTE FUNCTION inventory_candidate_freeze();
+
+-- ---- equation adoption: locked frame and decided reviews are immutable --
+CREATE OR REPLACE FUNCTION inventory_equation_review_freeze()
+RETURNS trigger AS $$
+BEGIN
+  -- the lock (survey data + identity + design) can never change once set
+  IF OLD.lock_snapshot IS NOT NULL
+     AND (NEW.lock_snapshot IS DISTINCT FROM OLD.lock_snapshot
+          OR NEW.lock_checksum IS DISTINCT FROM OLD.lock_checksum) THEN
+    RAISE EXCEPTION
+      'EquationReview %: locked frame is immutable.', OLD.id;
+  END IF;
+  -- a comparison is write-once audit evidence
+  IF OLD.comparison IS NOT NULL
+     AND NEW.comparison IS DISTINCT FROM OLD.comparison THEN
+    RAISE EXCEPTION
+      'EquationReview %: comparison is frozen audit evidence.', OLD.id;
+  END IF;
+  -- approved/withdrawn reviews are terminal
+  IF OLD.status IN ('approved', 'withdrawn')
+     AND (NEW.status IS DISTINCT FROM OLD.status
+          OR NEW.label IS DISTINCT FROM OLD.label) THEN
+    RAISE EXCEPTION
+      'EquationReview % is %; its decision cannot be changed.',
+      OLD.id, OLD.status;
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS inventory_equation_review_freeze_trg
+  ON inventory_equationreview;
+CREATE TRIGGER inventory_equation_review_freeze_trg
+BEFORE UPDATE ON inventory_equationreview
+FOR EACH ROW EXECUTE FUNCTION inventory_equation_review_freeze();
+
+-- exactly one approval per review (database mutex against concurrency)
+CREATE UNIQUE INDEX IF NOT EXISTS inventory_review_approval_slot_uniq
+  ON inventory_reviewapprovalslot (review_id);
+
+-- review and candidate event logs are append-only (modification blocked;
+-- a full demo reset that purges tables is an operator action, like the
+-- UPDATE-only freeze triggers above).
+CREATE OR REPLACE FUNCTION inventory_event_append_only()
+RETURNS trigger AS $$
+BEGIN
+  RAISE EXCEPTION 'review/candidate event log is append-only';
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS inventory_reviewevent_append_trg
+  ON inventory_reviewevent;
+CREATE TRIGGER inventory_reviewevent_append_trg
+BEFORE UPDATE ON inventory_reviewevent
+FOR EACH ROW EXECUTE FUNCTION inventory_event_append_only();
+
+DROP TRIGGER IF EXISTS inventory_candidateevent_append_trg
+  ON inventory_candidateevent;
+CREATE TRIGGER inventory_candidateevent_append_trg
+BEFORE UPDATE ON inventory_candidateevent
+FOR EACH ROW EXECUTE FUNCTION inventory_event_append_only();

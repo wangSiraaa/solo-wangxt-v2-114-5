@@ -163,15 +163,28 @@ class Command(BaseCommand):
     @transaction.atomic
     def handle(self, *args, **options):
         from inventory.models import (
+            EquationCandidate, EquationReview, CandidateEvent,
+            ReviewApprovalSlot, ReviewEvent,
             EstimateVersion, IdentityConflict, MeasurementImportRow,
             Tree, TreeMeasurement,
         )
-        models = [EstimateVersion, IdentityConflict, MeasurementImportRow,
+        # PROTECT forms a cycle: reviews protect their baseline version and
+        # an adoption-produced version protects its review. Break it by
+        # removing the adoption-produced editions first, then the reviews
+        # (events/slot first), which releases every baseline version.
+        EstimateVersion.objects.filter(
+            generated_by_review__isnull=False).delete()
+        ReviewEvent.objects.all().delete()
+        CandidateEvent.objects.all().delete()
+        ReviewApprovalSlot.objects.all().delete()
+        EquationReview.objects.all().delete()
+        EquationCandidate.objects.all().delete()
+        models = [EstimateVersion,
+                  IdentityConflict, MeasurementImportRow,
                   TreeMeasurement, Tree, Plot, Campaign,
                   AllometricEquation, Species, Stratum]
         for m in models:
             m.objects.all().delete()
-
         sA = Stratum.objects.create(
             code="A", name="Upland oak–pine mosaic (fictional)", area_ha=120.0)
         sB = Stratum.objects.create(
@@ -304,4 +317,94 @@ class Command(BaseCommand):
                 f"{f.get('t2_field_number')} d={f['distance_m']}m "
                 f"[{f['hint']}]")
 
+        self._seed_adoption_scenario(t1, t2, oak_eq, pin_eq, bir_eq, species)
+
         self.stdout.write(self.style.SUCCESS("seed complete"))
+
+    def _seed_adoption_scenario(self, t1, t2, oak_eq, pin_eq, bir_eq,
+                                species):
+        """
+        Equation-adoption review demo: a CONFIRMED baseline edition plus
+        candidate equations, one FULLY COVERING (ready to approve) and one
+        deliberately INCOMPLETE (missing species + narrow dbh range).
+        """
+        from inventory.models import EstimateVersion
+        from inventory.services import adoption
+        from inventory.services.estimator import (
+            build_measurement_table, estimate, equation_checksum,
+            resolved_identity_pairs,
+        )
+
+        # ---- 1. confirm the baseline edition with the v1 equations -------
+        eq_qs = AllometricEquation.objects.filter(
+            id__in=[oak_eq.id, pin_eq.id, bir_eq.id])
+        t1t, t2t, equations, plots, strata = build_measurement_table(
+            t1, t2, eq_qs)
+        renumber, distinct = resolved_identity_pairs(t1, t2)
+        interval = round((t2.measured_on - t1.measured_on).days / 365.25, 3)
+        design = {
+            "t1_code": t1.code, "t2_code": t2.code,
+            "interval_years": interval,
+            "dbh_sd_cm": settings.DBH_MEASUREMENT_SD_CM,
+            "height_sd_m": settings.HEIGHT_MEASUREMENT_SD_M,
+            "zero_tol_cm": settings.ZERO_GROWTH_TOL_CM,
+            "recruitment_cm": settings.RECRUITMENT_DBH_CM,
+            "fpc": True, "crs_epsg": settings.SURVEY_CRS_EPSG,
+        }
+        result = estimate(t1t, t2t, equations, plots, strata, design,
+                          renumber, distinct)
+        snap_strata = {code: {**s, "plot_codes": list(s["plot_codes"])}
+                       for code, s in strata.items()}
+        design_snapshot = {
+            **design, "strata": snap_strata,
+            "equation_ids": sorted(eq_qs.values_list("id", flat=True)),
+            "equation_codes": {sp: e["code"] + "@" + e["version"]
+                               for sp, e in equations.items()},
+            "area_tolerance": settings.PLOT_AREA_TOLERANCE}
+        from django.utils import timezone
+        baseline = EstimateVersion.objects.create(
+            label="2019-2024 baseline (v1 equations)",
+            t1_campaign=t1, t2_campaign=t2, status="confirmed",
+            design_snapshot=design_snapshot, result_payload=result,
+            equation_checksum=equation_checksum(equations),
+            confirmed_at=timezone.now())
+        baseline.equations.set(eq_qs)
+
+        # ---- 2. FULL candidate: all species, wide dbh range, new coeffs --
+        full = adoption.create_candidate({
+            "code": "FIC-AGB", "version": "3.0",
+            "species_codes": ["OAK", "PIN", "BIR"],
+            "form": "agb_kg = 0.1350 * dbh_cm^2.4200 * height_m^0.6000",
+            "a": 0.1350, "b": 2.4200, "c": 0.6000,
+            "dbh_min_cm": 5.0, "dbh_max_cm": 120.0,
+            "residual_sigma": 0.17,
+            "citation": "FICTIONAL new regional edition 2026 (full coverage)",
+        }, actor="seed-demo")
+        adoption.validate_candidate(full, actor="seed-demo")
+        review_full = adoption.create_review(
+            full, baseline, label="FIC-AGB 3.0 vs baseline v1",
+            actor="seed-demo")
+        review_full = adoption.run_comparison(review_full, actor="seed-demo")
+
+        # ---- 3. INCOMPLETE candidate: no BIR, dbh capped at 50 cm --------
+        partial = adoption.create_candidate({
+            "code": "FIC-AGB", "version": "3.0-draft",
+            "species_codes": ["OAK", "PIN"],
+            "form": "agb_kg = 0.1300 * dbh_cm^2.4200 * height_m^0.6000",
+            "a": 0.1300, "b": 2.4200, "c": 0.6000,
+            "dbh_min_cm": 5.0, "dbh_max_cm": 50.0,
+            "residual_sigma": 0.17,
+            "citation": "FICTIONAL partial draft 2026 (no birch; dbh<=50)",
+        }, actor="seed-demo")
+        adoption.validate_candidate(partial, actor="seed-demo")
+        review_partial = adoption.create_review(
+            partial, baseline, label="FIC-AGB 3.0-draft (INCOMPLETE demo)",
+            actor="seed-demo")
+        review_partial = adoption.run_comparison(
+            review_partial, actor="seed-demo")
+
+        self.stdout.write(
+            f"adoption demo: baseline edition #{baseline.id}; review "
+            f"#{review_full.id} [{review_full.coverage_status}] (approve to "
+            f"produce a new edition); review #{review_partial.id} "
+            f"[{review_partial.coverage_status}] (approval blocked).")

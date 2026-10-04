@@ -31,4 +31,22 @@ export const api = {
   estimate: (id) => get(`/estimates/${id}/`),
   createEstimate: (payload) => post("/estimates/", payload),
   confirmEstimate: (id) => post(`/estimates/${id}/confirm/`),
+
+  // equation adoption review workflow
+  candidates: (status) =>
+    get(`/candidate-equations/${status ? `?status=${status}` : ""}`),
+  candidate: (id) => get(`/candidate-equations/${id}/`),
+  createCandidate: (payload) => post("/candidate-equations/", payload),
+  validateCandidate: (id) =>
+    post(`/candidate-equations/${id}/validate/`, {}),
+  withdrawCandidate: (id, note) =>
+    post(`/candidate-equations/${id}/withdraw/`, { note: note || "" }),
+  candidateEvents: (id) => get(`/candidate-equations/${id}/events/`),
+  reviews: (qs) => get(`/equation-reviews/${qs ? `?${qs}` : ""}`),
+  review: (id) => get(`/equation-reviews/${id}/`),
+  createReview: (payload) => post("/equation-reviews/", payload),
+  compareReview: (id) => post(`/equation-reviews/${id}/compare/`, {}),
+  approveReview: (id, label) =>
+    post(`/equation-reviews/${id}/approve/`, label ? { label } : {}),
+  reviewEvents: (id) => get(`/equation-reviews/${id}/events/`),
 };

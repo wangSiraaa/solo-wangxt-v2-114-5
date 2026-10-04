@@ -71,6 +71,28 @@ Y = Σ_h Y_h，SE 跨层合成（Welch–Satterthwaite 自由度，t 分布 95% 
 * 确认时同时**锁定所用方程**（系数不可改）；新系数必须以**新方程 code/version** 录入，
   并产生**新版本估计**，旧版本数字永不改变。
 
+### 1.7 新版异速生长方程必须经“方程采用评审”
+研究团队拟换用新版方程时，必须证明新、旧估计的差异**只来自方程**，而不是数据、
+身份判断或抽样框漂移：
+
+* 候选方程生命周期 `candidate → validated → approved/withdrawn`，记录适用树种、
+  径阶、系数、残差 σ、文献、校验结果与审批事件；验证后系数/适用树种冻结。
+* 每个评审（`EquationReview`）锁定**一个既有 confirmed `EstimateVersion`**：
+  比较时复制并校验该版的逐树调查行、人工身份决定（renumber/distinct/open）、
+  样地/层面积、进界阈值与全部设计参数（`lock_snapshot` + SHA-256 `lock_checksum`），
+  比较**不再读当前数据库**——锁后删改数据也不影响结果。
+* 比较在同一锁定帧上分别用基准方程与候选方程重跑，先验证基准重跑**逐位复现**
+  已冻结数字（差异来源栏：data/identity/frame drift = none），再输出
+  **逐树 / 逐样地 / 总体**差异与**覆盖矩阵**（树种 × 5 cm 径阶：覆盖、外推、
+  缺树种、缺输入）。
+* 覆盖判定：缺树种、径阶超出候选 `dbh_min/max`（外推）、或候选要求基准未要求的
+  输入 → `incomplete`，**禁止批准**。
+* 批准才生成**独立的新 confirmed `EstimateVersion`**（同时产生新 code/version 的
+  锁定方程，未覆盖树种沿用基准锁定方程）；旧版本与已锁定方程一律不变。
+* 同一评审并发批准由 `ReviewApprovalSlot` 唯一约束（+ 应用层互斥）保证**只生成一个
+  新版本**；撤回的候选其比较保留审计但永远不能确认。普通两期估计流程不选择候选
+  方程时行为完全不变（候选方程不出现在 `/api/equations/`）。
+
 ---
 
 ## 2. 不确定性假设（结果中完整输出）
@@ -113,11 +135,14 @@ npm install
 npm run dev          # http://localhost:5173, /api 代理到 8123
 ```
 
-界面三页：
+界面四页：
 1. **Plots & individuals**：SVG 地图显示全部样地边界与 t2 个体状态；点入样地看 t1→t2 复测、
    改号、零生长/缺测/死亡着色；
 2. **Identity conflicts**：编号矛盾核实工作台（renumber / distinct）；
-3. **Estimates**：选择方程→跑 draft→查看分量、来源、不确定性→确认冻结。
+3. **Estimates**：选择方程→跑 draft→查看分量、来源、不确定性→确认冻结；
+4. **Equation adoption review**：候选方程创建/校验/撤回；选定锁定基准版后跑影响比较
+   ——覆盖矩阵（树种×径阶）、差异来源（基准复现）、逐树/逐样地/总体差异；
+   complete 才能批准生成独立新版本；历史评审与审批事件可审计。
 
 ---
 
@@ -130,9 +155,20 @@ npm run dev          # http://localhost:5173, /api 代理到 8123
 | GET | `/api/conflicts/?status=open` | 同号位置矛盾 |
 | POST | `/api/conflicts/{id}/resolve/` | `{status: renumber|distinct, note}` |
 | POST | `/api/imports/` | 批量入库（拒收单位错误/越界行，207 返回明细） |
-| POST | `/api/estimates/` | 运行 draft 估计 |
+| POST | `/api/estimates/` | 运行 draft 估计（不选候选方程时维持原行为） |
 | POST | `/api/estimates/{id}/confirm/` | 冻结版本并锁定方程 |
 | GET | `/api/estimates/{id}/` | 完整结果：分量 + 来源 + 不确定性 |
+| POST | `/api/candidate-equations/` | 创建候选方程（新 code/version、树种、径阶、系数、文献） |
+| GET | `/api/candidate-equations/` | 候选列表（可按 `?status=` 过滤） |
+| POST | `/api/candidate-equations/{id}/validate/` | 结构+数值校验 → validated |
+| POST | `/api/candidate-equations/{id}/withdraw/` | 撤回（其评审比较保留审计、不可确认） |
+| GET | `/api/candidate-equations/{id}/events/` | 候选生命周期事件 |
+| POST | `/api/equation-reviews/` | 锁定一个 confirmed 基准版并创建评审 |
+| POST | `/api/equation-reviews/{id}/compare/` | 在锁定帧上跑基准 vs 候选比较（写一次） |
+| POST | `/api/equation-reviews/{id}/approve/` | complete 才允许；生成独立新 confirmed 版 |
+| GET | `/api/equation-reviews/` | 评审历史（`?status=&coverage=` 过滤） |
+| GET | `/api/equation-reviews/{id}/` | 完整比较：覆盖矩阵 + 差异来源 + 三层差异 |
+| GET | `/api/equation-reviews/{id}/events/` | 评审/批准审计事件 |
 
 ### 入库行示例
 ```json
@@ -154,8 +190,12 @@ npm run dev          # http://localhost:5173, /api 代理到 8123
 ```bash
 cd backend && python3 manage.py test inventory
 ```
-12 个测试覆盖：改号、同号位置矛盾（剔除→核实 distinct 后才入死亡/进界）、
-不等面积按样地扩展、单位错误拒收、零生长/缺测/死亡区分、已确认版本对新方程与直接篡改免疫。
+24 个测试覆盖：改号、同号位置矛盾（剔除→核实 distinct 后才入死亡/进界）、
+不等面积按样地扩展、单位错误拒收、零生长/缺测/死亡区分、已确认版本对新方程与直接篡改免疫，
+以及**方程采用评审** 12 项：完整覆盖批准生成独立新版本而旧版不变、缺树种/超径阶
+incomplete 且禁止批准、撤回保留审计不可确认、并发批准只生成一个新版本、
+普通两期流程不选候选方程时保持原行为，外加锁定帧（数据/身份/设计）不受锁后改动影响、
+比较写一次、候选验证后系数与树种冻结、基准必须 confirmed 等。
 
 ## 6. 虚构演示数据场景索引
 * `P01/004` 两次胸径相同 → **真实零生长**；
@@ -167,3 +207,6 @@ cd backend && python3 manage.py test inventory
 * `P04/002` dbh 102 cm → **超出方程径阶范围**标记；
 * 4 条坏行（mm 当 cm、树高 cm 当 m、缺单位、坐标越界）→ **入库拒收**；
 * 样地面积 0.20 / 0.50 / 1.00 ha 不等。
+* `seed_demo` 额外生成：一个 confirmed 基准版（v1 方程）；候选 `FIC-AGB 3.0`
+  **全树种全覆盖**（评审 complete，可批准产生新版本）与 `FIC-AGB 3.0-draft`
+  **缺 BIR 且径阶上限 50 cm**（评审 incomplete，批准被禁）。

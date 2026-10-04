@@ -4,8 +4,9 @@ import PlotMap from "./components/PlotMap.jsx";
 import PlotDetail from "./components/PlotDetail.jsx";
 import ConflictsWorkbench from "./components/ConflictsWorkbench.jsx";
 import EstimatePanel from "./components/EstimatePanel.jsx";
+import AdoptionPanel from "./components/AdoptionPanel.jsx";
 
-const TABS = ["map", "conflicts", "estimates"];
+const TABS = ["map", "conflicts", "estimates", "adoption"];
 
 export default function App() {
   const [tab, setTab] = useState("map");
@@ -82,7 +83,8 @@ export default function App() {
                   onClick={() => setTab(t)}>
             {t === "map" ? "Plots & individuals"
               : t === "conflicts" ? `Identity conflicts (${conflicts.length})`
-              : "Estimates"}
+              : t === "estimates" ? "Estimates"
+              : "Equation adoption review"}
           </button>
         ))}
       </nav>
@@ -101,6 +103,7 @@ export default function App() {
                               }} />
         )}
         {tab === "estimates" && <EstimatePanel ctx={ctx} />}
+        {tab === "adoption" && <AdoptionPanel />}
       </main>
 
       <footer>
